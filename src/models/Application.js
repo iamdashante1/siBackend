@@ -1,36 +1,23 @@
-import mongoose from "mongoose";
-
-const statusHistorySchema = new mongoose.Schema(
-  {
-    from: { type: String },
-    to: { type: String, required: true },
-    changedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    at: { type: Date, default: Date.now },
-  },
-  { _id: false }
-);
+import mongoose from 'mongoose';
+import { APP_STATUS } from '../lib/constants.js';
+import { cleanJson } from './_json.js';
 
 const applicationSchema = new mongoose.Schema(
   {
-    studentId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    opportunityId: { type: mongoose.Schema.Types.ObjectId, ref: "Opportunity", required: true },
-    coverLetter: { type: String },
-    resumeUrl: { type: String, required: true },
-    status: {
-      type: String,
-      enum: ["submitted", "shortlisted", "interview", "accepted", "rejected"],
-      default: "submitted",
-    },
-    interview: {
-      date: { type: Date },
-      format: { type: String },
-    },
-    submittedAt: { type: Date, default: Date.now },
-    statusHistory: [statusHistorySchema],
+    code: { type: String, unique: true },
+    student: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    opportunity: { type: mongoose.Schema.Types.ObjectId, ref: 'Opportunity', required: true },
+    employer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    coverLetter: { type: String, required: true },
+    status: { type: String, enum: APP_STATUS, default: 'submitted' },
+    appliedAt: { type: Date, default: Date.now },
+    // Timeline shown to the student: [{ label, at }]
+    events: [{ _id: false, label: String, at: { type: Date, default: Date.now } }],
   },
-  { timestamps: true }
+  { timestamps: true },
 );
+// One application per student per opportunity. (A withdrawn application is reused if they re-apply.)
+applicationSchema.index({ student: 1, opportunity: 1 }, { unique: true });
+cleanJson(applicationSchema);
 
-applicationSchema.index({ studentId: 1, opportunityId: 1 }, { unique: true });
-
-export default mongoose.model("Application", applicationSchema);
+export const Application = mongoose.model('Application', applicationSchema);
