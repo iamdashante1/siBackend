@@ -6,7 +6,7 @@ const userSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-    passwordHash: { type: String, required: true },
+    passwordHash: { type: String }, // bcrypt hash; never sent to the client
     role: { type: String, enum: Object.values(ROLES), required: true },
     status: { type: String, enum: ACCOUNT_STATUS, default: 'active' },
     phone: { type: String, default: '' },
@@ -31,6 +31,8 @@ const userSchema = new mongoose.Schema(
       about: { type: String, default: '' },
       contactTitle: { type: String, default: '' },
     },
+    // Profile photo, stored on Cloudinary (publicId is needed to replace or delete it).
+    avatar: { url: String, publicId: String },
     // CV (PDF) bytes are kept out of normal queries; fetched through their own route.
     cv: { type: { name: String, size: Number, data: Buffer, uploadedAt: Date }, select: false },
     cvInfo: { name: String, size: Number, uploadedAt: Date },

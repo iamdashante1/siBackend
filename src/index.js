@@ -8,6 +8,11 @@ import { createApp } from './app.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
+if (!config.jwtSecret) {
+  console.error('Set JWT_SECRET in backend/.env (a long random string).');
+  process.exit(1);
+}
+
 try {
   await mongoose.connect(config.mongoUri, { serverSelectionTimeoutMS: 8000 });
   console.log('Connected to MongoDB');
@@ -16,7 +21,7 @@ try {
   process.exit(1);
 }
 
-const app = createApp({ mongoUrl: config.mongoUri });
+const app = createApp();
 
 // In production the built React app is served by this same server (same origin, so cookies just work).
 const clientDist = path.resolve(here, '../../frontend/dist');

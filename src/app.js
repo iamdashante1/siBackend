@@ -1,7 +1,5 @@
 import express from 'express';
 import helmet from 'helmet';
-import session from 'express-session';
-import MongoStore from 'connect-mongo';
 import { config } from './config.js';
 import { requireAuth, requireCustomHeader } from './middleware/auth.js';
 import { errorHandler } from './middleware/validate.js';
@@ -14,26 +12,19 @@ import placementRoutes from './routes/placements.js';
 import adminRoutes from './routes/admin.js';
 import publicRoutes from './routes/public.js';
 
-export function createApp({ mongoUrl, secret = config.sessionSecret, production = config.env === 'production' } = {}) {
-  if (!secret) throw new Error('SESSION_SECRET is not set. Copy .env.example to .env and set it.');
-
+export function createApp({ production = config.env === 'production' } = {}) {
   const app = express();
-  if (production) app.set('trust proxy', 1); // needed for secure cookies behind a hosting proxy
-  app.use(helmet());
-  app.use(express.json({ limit: '3mb' })); // CV uploads are sent as base64 JSON (max 2 MB file)
-
-  const store = MongoStore.create({ mongoUrl, ttl: 7 * 24 * 60 * 60 });
-  app.locals.sessionStore = store;
+  if (production) app.set('trust proxy', 1); // behind the hosting proxy
+  // Profile photos are served from Cloudinary, so allow images from there.
   app.use(
-    session({
-      name: 'placeme.sid',
-      secret,
-      resave: false,
-      saveUninitialized: false,
-      store,
-      cookie: { httpOnly: true, sameSite: 'lax', secure: production, maxAge: 7 * 24 * 60 * 60 * 1000 },
+    helmet({
+      contentSecurityPolicy: {
+        directives: { ...helmet.contentSecurityPolicy.getDefaultDirectives(), 'img-src': ["'self'", 'data:', 'https://res.cloudinary.com'] },
+      },
     }),
   );
+  app.use(express.json({ limit: '3mb' })); // CV uploads are sent as base64 JSON (max 2 MB file)
+
   app.use('/api', requireCustomHeader);
 
   app.get('/api/health', (_req, res) => res.json({ ok: true }));

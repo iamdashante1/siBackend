@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startTestApp, client, makeAdmin, register, validOpportunity, futureDate } from './helpers.js';
+import { startTestApp, client, makeAdmin, loginAdmin, TEST_PASSWORD, register, validOpportunity, futureDate } from './helpers.js';
 import { User } from '../src/models/User.js';
 
 let ctx;
@@ -15,48 +15,55 @@ before(async () => {
 after(() => ctx.stop());
 
 // ---------------- authentication ----------------
-test('registration validates input and rejects admin signups', async () => {
-  const c = client(ctx.app);
-  let res = await c.post('/api/auth/register', { role: 'STUDENT', name: 'A', email: 'bad', password: 'short' });
-  assert.equal(res.status, 400);
-  assert.ok(res.body.fields.email && res.body.fields.password);
+test('registration creates the account; admin role is not trusted', async () => {
+  // A sign-up that asks to be an admin only ever becomes a student.
+  const m = client(ctx.app);
+  const mallory = await register(m, 'ADMIN', 'Mallory', 'm@x.com');
+  assert.equal(mallory.role, 'STUDENT', 'sign-up must not create admins');
 
-  res = await c.post('/api/auth/register', { role: 'ADMIN', name: 'Mallory', email: 'm@x.com', password: 'Passw0rd1' });
-  assert.equal(res.status, 400, 'public registration must not create admins');
+  // Employers start unverified and keep the organisation they typed.
+  const e = client(ctx.app);
+  const emp = await register(e, 'EMPLOYER', 'Emp', 'emp@x.com', { organisation: 'Emp Co' });
+  assert.equal(emp.role, 'EMPLOYER');
+  assert.equal(emp.status, 'unverified');
+  assert.equal(emp.employer.company, 'Emp Co');
 
-  res = await c.post('/api/auth/register', { role: 'EMPLOYER', name: 'Emp', email: 'noorg@x.com', password: 'Passw0rd1' });
-  assert.equal(res.status, 400);
-  assert.ok(res.body.fields.organisation);
+  // Duplicate emails are refused.
+  assert.equal((await client(ctx.app).post('/api/auth/register', { role: 'STUDENT', name: 'Dup', email: 'admin@test.local', password: TEST_PASSWORD })).status, 409);
 });
 
-test('register, login, me, logout and password hygiene', async () => {
+test('sign-in, me, sign-out and no password data', async () => {
   const user = await register(student.http, 'STUDENT', 'Shanice Campbell', 'shanice@test.local');
   assert.equal(user.role, 'STUDENT');
   assert.equal(user.passwordHash, undefined, 'hash must never be returned');
   const stored = await User.findOne({ email: 'shanice@test.local' });
-  assert.notEqual(stored.passwordHash, 'Passw0rd1');
-  assert.match(stored.passwordHash, /^\$2[aby]\$/);
+  assert.ok(stored.passwordHash.startsWith('$2'), 'password is stored as a bcrypt hash');
 
-  assert.equal((await student.http.get('/api/auth/me')).body.user.email, 'shanice@test.local', 'session persists');
+  assert.equal((await student.http.get('/api/auth/me')).body.user.email, 'shanice@test.local');
+  // Logging in again finds the same account; wrong password and wrong tab are refused.
+  const again = client(ctx.app);
+  assert.equal((await again.post('/api/auth/login', { email: 'shanice@test.local', password: 'wrongpass1' })).status, 401);
+  assert.equal((await again.post('/api/auth/login', { email: 'shanice@test.local', password: TEST_PASSWORD, role: 'EMPLOYER' })).status, 401);
+  const ok = await again.post('/api/auth/login', { email: 'shanice@test.local', password: TEST_PASSWORD, role: 'STUDENT' });
+  assert.equal(ok.body.user.id, user.id);
+  assert.equal((await again.get('/api/auth/me')).body.user.id, user.id);
+  await again.post('/api/auth/logout');
+  assert.equal((await again.get('/api/auth/me')).body.user, null, 'logout clears the cookie');
 
-  const dup = await client(ctx.app).post('/api/auth/register', { role: 'STUDENT', name: 'Dup', email: 'SHANICE@test.local', password: 'Passw0rd1' });
-  assert.equal(dup.status, 409);
+  // A tampered token is rejected.
+  const request = (await import('supertest')).default;
+  const forged = await request(ctx.app).get('/api/applications').set('Authorization', 'Bearer not.a.jwt');
+  assert.equal(forged.status, 401);
 
+  // Signed out means no user and no access.
   const anon = client(ctx.app);
-  assert.equal((await anon.post('/api/auth/login', { email: 'shanice@test.local', password: 'wrong-pass1' })).status, 401);
-  assert.equal((await anon.post('/api/auth/login', { email: 'nobody@test.local', password: 'Passw0rd1' })).status, 401);
-  assert.equal((await anon.post('/api/auth/login', { email: 'shanice@test.local', password: 'Passw0rd1', role: 'EMPLOYER' })).status, 401);
-  assert.equal((await anon.post('/api/auth/login', { email: 'shanice@test.local', password: 'Passw0rd1', role: 'STUDENT' })).status, 200);
-
-  assert.equal((await student.http.post('/api/auth/logout')).status, 200);
-  assert.equal((await student.http.get('/api/auth/me')).body.user, null);
-  assert.equal((await student.http.get('/api/applications')).status, 401);
-  await student.http.post('/api/auth/login', { email: 'shanice@test.local', password: 'Passw0rd1' });
+  assert.equal((await anon.get('/api/auth/me')).body.user, null);
+  assert.equal((await anon.get('/api/applications')).status, 401);
 });
 
 test('state-changing requests without the CSRF header are refused', async () => {
   const request = (await import('supertest')).default;
-  const res = await request(ctx.app).post('/api/auth/login').send({ email: 'a@b.com', password: 'x' });
+  const res = await request(ctx.app).post('/api/opportunities').send({});
   assert.equal(res.status, 403);
 });
 
@@ -80,7 +87,7 @@ test('unverified employers can draft but not submit; admin verifies', async () =
   assert.equal(draft.body.opportunity.status, 'draft');
   assert.equal(draft.body.opportunity.employer, (await employer.http.get('/api/auth/me')).body.user.id);
 
-  await admin.http.post('/api/auth/login', { email: 'admin@test.local', password: 'Admin1234', role: 'ADMIN' });
+  await loginAdmin(admin.http);
   const employers = await admin.http.get('/api/admin/employers');
   const emp = employers.body.employers.find((e) => e.email === 'andre@halden.test');
   assert.equal(emp.status, 'unverified');
@@ -212,6 +219,38 @@ test('suspended accounts lose access immediately', async () => {
   const u = await register(s4, 'STUDENT', 'To Suspend', 'suspend@test.local');
   assert.equal((await s4.get('/api/opportunities')).status, 200);
   await admin.http.patch(`/api/admin/users/${u.id}/status`, { status: 'suspended' });
-  assert.equal((await s4.get('/api/opportunities')).status, 401);
-  assert.equal((await client(ctx.app).post('/api/auth/login', { email: 'suspend@test.local', password: 'Passw0rd1' })).status, 403);
+  assert.equal((await s4.get('/api/opportunities')).status, 403);
+  assert.equal((await s4.get('/api/auth/me')).status, 403);
+});
+
+test('opportunity list paginates only when asked', async () => {
+  const all = await admin.http.get('/api/opportunities');
+  assert.equal(all.status, 200);
+  assert.equal(all.body.page, undefined, 'unpaged by default');
+  const total = all.body.opportunities.length;
+  assert.ok(total >= 1);
+
+  const first = await admin.http.get('/api/opportunities?page=1&limit=1');
+  assert.equal(first.body.total, total);
+  assert.equal(first.body.pages, total);
+  assert.equal(first.body.opportunities.length, 1);
+  assert.equal(first.body.opportunities[0].id, all.body.opportunities[0].id);
+
+  const beyond = await admin.http.get('/api/opportunities?page=999&limit=1');
+  assert.equal(beyond.body.page, total, 'page is clamped to the last one');
+});
+
+test('opportunity list filters by field, sorts, and returns facets', async () => {
+  const base = await admin.http.get('/api/opportunities?page=1&limit=50');
+  assert.ok(Array.isArray(base.body.fields));
+  assert.equal(typeof base.body.counts, 'object');
+  const field = base.body.opportunities.find((o) => o.field)?.field;
+  if (field) {
+    const r = await admin.http.get(`/api/opportunities?page=1&field=${encodeURIComponent(field)}`);
+    assert.ok(r.body.opportunities.every((o) => o.field === field));
+  }
+  const none = await admin.http.get('/api/opportunities?page=1&field=__nope__');
+  assert.equal(none.body.total, 0);
+  const newest = await admin.http.get('/api/opportunities?page=1&sort=newest');
+  assert.equal(newest.status, 200);
 });

@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import bcrypt from 'bcryptjs';
 import request from 'supertest';
+import bcrypt from 'bcryptjs';
 import { createApp } from '../src/app.js';
 import { User } from '../src/models/User.js';
 
@@ -12,18 +12,17 @@ export async function startTestApp() {
   const mongod = await MongoMemoryServer.create();
   const uri = mongod.getUri('placeme_test');
   await mongoose.connect(uri);
-  const app = createApp({ mongoUrl: uri, secret: 'test-secret', production: false });
+  const app = createApp({ production: false });
   return {
     app,
     async stop() {
-      await app.locals.sessionStore.close();
       await mongoose.disconnect();
       await mongod.stop();
     },
   };
 }
 
-// A supertest agent that keeps cookies and sends the CSRF header automatically.
+// A supertest client that sends the CSRF header. Its cookie jar keeps the JWT after register/login.
 export function client(app) {
   const agent = request.agent(app);
   const wrapped = {};
@@ -36,12 +35,21 @@ export function client(app) {
   return wrapped;
 }
 
-export async function makeAdmin(email = 'admin@test.local', password = 'Admin1234') {
-  return User.create({ name: 'Test Admin', email, passwordHash: await bcrypt.hash(password, 4), role: 'ADMIN' });
+export const TEST_PASSWORD = 'Passw0rd123';
+
+// An admin exists before anyone logs in (the seed script creates them).
+export async function makeAdmin(email = 'admin@test.local') {
+  return User.create({ name: 'Test Admin', email, role: 'ADMIN', passwordHash: await bcrypt.hash(TEST_PASSWORD, 4) });
+}
+export async function loginAdmin(c, email = 'admin@test.local') {
+  const res = await c.post('/api/auth/login', { email, password: TEST_PASSWORD });
+  if (res.status !== 200) throw new Error(`admin login failed: ${res.status} ${JSON.stringify(res.body)}`);
+  return res.body.user;
 }
 
+// Registers through the real endpoint and leaves the client logged in. Returns the app user.
 export async function register(c, role, name, email, extra = {}) {
-  const res = await c.post('/api/auth/register', { role, name, email, password: 'Passw0rd1', ...extra });
+  const res = await c.post('/api/auth/register', { role, name, email, password: TEST_PASSWORD, organisation: extra.organisation });
   if (res.status !== 201) throw new Error(`register failed: ${res.status} ${JSON.stringify(res.body)}`);
   return res.body.user;
 }

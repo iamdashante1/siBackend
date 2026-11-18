@@ -7,20 +7,21 @@ import { Notification } from '../models/Notification.js';
 import { ROLES } from '../lib/constants.js';
 import { AppError, conflict, wrap } from '../lib/errors.js';
 import { parseBody } from '../middleware/validate.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, userFromRequest } from '../middleware/auth.js';
 import { notifyAdmins } from '../lib/notify.js';
+import { signToken, setAuthCookie, clearAuthCookie } from '../lib/tokens.js';
 import { config } from '../config.js';
 
 const router = Router();
 
-// Basic brute-force protection for logins.
-const loginLimiter = rateLimit({
+// Basic brute-force protection.
+const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 20,
+  limit: 30,
   standardHeaders: true,
   legacyHeaders: false,
   skip: () => config.env === 'test',
-  message: { error: 'Too many login attempts. Please wait a few minutes and try again.' },
+  message: { error: 'Too many attempts. Please wait a few minutes and try again.' },
 });
 
 const password = z
@@ -37,9 +38,14 @@ const registerSchema = z.object({
   organisation: z.string().trim().max(120).optional(),
 });
 
+const startSession = (res, user) => setAuthCookie(res, signToken(user));
+
 router.post(
   '/register',
+  limiter,
   wrap(async (req, res) => {
+    // A sign-up asking to be an admin is treated as a student, never an admin.
+    if (req.body?.role === ROLES.ADMIN) req.body = { ...req.body, role: ROLES.STUDENT };
     const data = parseBody(registerSchema, req.body);
     if (data.role === ROLES.EMPLOYER && !data.organisation) {
       throw new AppError(400, 'Please fix the highlighted fields.', { organisation: 'Enter your organisation name.' });
@@ -59,7 +65,7 @@ router.post(
     if (data.role === ROLES.EMPLOYER) {
       await notifyAdmins('Employer registered', `${data.organisation} registered and needs verification.`);
     }
-    await startSession(req, user);
+    startSession(res, user);
     res.status(201).json({ user });
   }),
 );
@@ -72,36 +78,35 @@ const loginSchema = z.object({
 
 router.post(
   '/login',
-  loginLimiter,
+  limiter,
   wrap(async (req, res) => {
     const { email, password: pw, role } = parseBody(loginSchema, req.body);
     const user = await User.findOne({ email });
     // Same message for unknown email and wrong password so we do not reveal which emails exist.
-    const ok = user && (await bcrypt.compare(pw, user.passwordHash));
+    const ok = user?.passwordHash && (await bcrypt.compare(pw, user.passwordHash));
     if (!ok) throw new AppError(401, 'Incorrect email or password.');
     if (user.status === 'suspended') throw new AppError(403, 'This account has been suspended. Contact the placement office.');
     if (role && role !== user.role) {
       const label = { STUDENT: 'a student', EMPLOYER: 'an employer', ADMIN: 'a placement office' }[user.role];
-      throw new AppError(401, `This account is registered as ${label} account. Choose the matching tab.`);
+      throw new AppError(401, `This is ${label} account. Choose the matching tab.`);
     }
-    await startSession(req, user);
+    startSession(res, user);
     res.json({ user });
   }),
 );
 
-router.post('/logout', (req, res, next) => {
-  req.session.destroy((err) => {
-    if (err) return next(err);
-    res.clearCookie('placeme.sid');
-    res.json({ ok: true });
-  });
+router.post('/logout', (_req, res) => {
+  clearAuthCookie(res);
+  res.json({ ok: true });
 });
 
-router.get('/me', (req, res, next) => {
-  // Not logged in is a normal answer here, not an error: the UI uses it to decide what to show.
-  if (!req.session?.userId) return res.json({ user: null });
-  requireAuth(req, res, (err) => (err ? next(err) : res.json({ user: req.user })));
-});
+// Not logged in is a normal answer here, not an error: the UI uses it to decide what to show.
+router.get(
+  '/me',
+  wrap(async (req, res) => {
+    res.json({ user: await userFromRequest(req) });
+  }),
+);
 
 router.get(
   '/notifications',
@@ -111,16 +116,5 @@ router.get(
     res.json({ notifications: items });
   }),
 );
-
-// New session id on every login prevents session fixation.
-function startSession(req, user) {
-  return new Promise((resolve, reject) => {
-    req.session.regenerate((err) => {
-      if (err) return reject(err);
-      req.session.userId = String(user._id);
-      req.session.save((e) => (e ? reject(e) : resolve()));
-    });
-  });
-}
 
 export default router;

@@ -70,7 +70,7 @@ function fromInput(data) {
 router.get(
   '/',
   wrap(async (req, res) => {
-    const { q, type, mode, status } = req.query;
+    const { q, type, mode, status, field, sort } = req.query;
     const filter = {};
     const role = req.user.role;
 
@@ -83,14 +83,40 @@ router.get(
     } else {
       filter.status = status ? String(status) : { $ne: 'draft' };
     }
+    // What this role may see, before the user's own filters. Facets (field names, tab counts) use it.
+    const scope =
+      role === ROLES.STUDENT ? { status: 'open', $or: filter.$or }
+      : role === ROLES.EMPLOYER ? { employer: req.user._id }
+      : { status: { $ne: 'draft' } };
+    if (field) filter.field = String(field);
     if (type && OPP_TYPES.includes(String(type))) filter.type = String(type);
     if (mode && WORK_MODES.includes(String(mode))) filter.workMode = String(mode);
 
-    let opps = await Opportunity.find(filter).sort({ deadline: 1, createdAt: -1 }).populate('employer', EMPLOYER_FIELDS);
+    // "closing" (default) lists the soonest deadline first; "newest" lists the latest posted first.
+    const order = sort === 'newest' ? { createdAt: -1 } : { deadline: 1, createdAt: -1 };
+    let opps = await Opportunity.find(filter).sort(order).populate('employer', EMPLOYER_FIELDS);
 
     if (q) {
       const rx = new RegExp(escapeRegex(String(q).trim()), 'i');
       opps = opps.filter((o) => [o.title, o.location, o.field, o.employer?.employer?.company].some((t) => rx.test(t || '')));
+    }
+    // Pagination is opt-in (?page=1&limit=12) so pages that need the whole list keep working.
+    if (req.query.page !== undefined) {
+      const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 12));
+      const total = opps.length;
+      const pages = Math.max(1, Math.ceil(total / limit));
+      const page = Math.min(pages, Math.max(1, parseInt(req.query.page, 10) || 1));
+      const slice = opps.slice((page - 1) * limit, page * limit);
+      // Facets let the UI offer only choices that exist: field names, and per-status counts for tabs.
+      const [fields, byStatus] = await Promise.all([
+        Opportunity.distinct('field', scope),
+        role === ROLES.STUDENT ? [] : Opportunity.aggregate([{ $match: scope }, { $group: { _id: '$status', n: { $sum: 1 } } }]),
+      ]);
+      const counts = Object.fromEntries(byStatus.map((c) => [c._id, c.n]));
+      return res.json({
+        opportunities: await withExtras(slice, req.user), page, pages, total, limit,
+        fields: fields.filter(Boolean).sort(), counts,
+      });
     }
     res.json({ opportunities: await withExtras(opps, req.user) });
   }),
